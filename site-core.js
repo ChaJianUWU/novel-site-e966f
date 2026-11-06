@@ -258,9 +258,11 @@ async function auditImport(env, novel, list) {
   const back = existing.slice(-AUDIT_MAX_BACK)
   const recs = await Promise.all(back.map((c) => readChapter(env, novel.id, c.id).catch(() => null)))
   const parts = []
-  for (const rec of recs) {
-    const body = String((rec && rec.content) || '')
-    if (body) parts.push(body)
+  for (let i = 0; i < back.length; i++) {
+    const body = String((recs[i] && recs[i].content) || '')
+    if (!body) continue
+    // 标题也拼进去：整本重贴时切出来的段落常把标题夹在正文里，站内照样拼一条才对齐
+    parts.push(String(back[i].title || '') + body)
   }
   // 去标点空白只留字和数字，分章边界变了也照样对得上
   const oldBlob = parts.join('').replace(AUDIT_STRIP, '')
@@ -274,12 +276,28 @@ async function auditImport(env, novel, list) {
   const fresh = []
   const have = []
   for (const item of list) {
-    const norm = String(item.content || '').replace(AUDIT_STRIP, '')
+    // 标题也带上：整本重贴时切出来的段落会把标题夹在正文里，跟 oldBlob 的拼法保持一致
+    const norm = String(item.title || '').replace(AUDIT_STRIP, '') + String(item.content || '').replace(AUDIT_STRIP, '')
     const t = normTitle(item.title)
     let dup = false
     if (oldBlob && norm.length >= 20) {
-      // 只认开头：作者把某章续写改长了也算旧章，免得同一章越接越重复
-      dup = oldBlob.includes(norm.slice(0, AUDIT_PROBE))
+      // 取头/中/尾几段探针，过半能对上就当这段已经进站了。
+      // 用多个点是因为分章边界会挪，光看开头容易因为标题位置不同而漏判。
+      const ps = []
+      if (norm.length <= AUDIT_PROBE) {
+        ps.push(norm)
+      } else if (norm.length < AUDIT_PROBE * 3) {
+        ps.push(norm.slice(0, AUDIT_PROBE), norm.slice(-AUDIT_PROBE))
+      } else {
+        const span = norm.length - AUDIT_PROBE
+        for (const f of [0, 0.5, 1]) {
+          const at = Math.round(span * f)
+          ps.push(norm.slice(at, at + AUDIT_PROBE))
+        }
+      }
+      let hit = 0
+      for (const p of ps) if (p && oldBlob.includes(p)) hit++
+      dup = hit >= Math.ceil(ps.length * 0.6)
     } else if (oldBlob && norm) {
       dup = oldBlob.includes(norm)
     } else {
