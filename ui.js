@@ -681,7 +681,7 @@ export function pageEdit(config, novel) {
 
 export function pageAdmin(config) {
   const body = `<h1>管理后台</h1>
-<p class="muted">用站长密钥进入。密钥在服务器启动日志的「管理员密钥」一行，也在服务器的 <span class="mono">data/admin-key.txt</span> 里。填一次会记在这台浏览器，下次打开直接进。</p>
+<p class="muted">用站长密钥进入，填一次会记在这台浏览器，下次打开直接进。忘了就在浏览器里删掉 <span class="mono">novel_admin_key</span> 重新填。</p>
 <div class="panel" id="login">
   <div class="field"><label>管理员密钥</label><input id="akey" type="password" placeholder="粘进来，回车即可" autocomplete="off"></div>
   <button class="btn pri" id="btnLogin">进入</button>
