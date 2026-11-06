@@ -235,6 +235,82 @@ async function appendChapters(env, novel, list) {
   return created
 }
 
+// ---------------- 追加导入的审核 ----------------
+// 常见情况：作者把「整本稿子」又贴一遍，旧章节会被当成新章再落一次，越滚越多。
+// 这里先比对：在新稿里定位「已有最后一章」的位置，只取它之后的部分作为新增。
+const AUDIT_STRIP = /[^\p{L}\p{N}]+/gu
+
+async function contentFp(text) {
+  const norm = String(text || '').replace(AUDIT_STRIP, '')
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(norm))
+  return Array.from(new Uint8Array(buf)).slice(0, 10).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function normTitle(s) {
+  return String(s || '').replace(AUDIT_STRIP, '').toLowerCase()
+}
+
+async function auditImport(env, novel, list) {
+  const existing = (novel && novel.chapters) || []
+  if (!existing.length) return { fresh: list, have: [], anchor: '', anchorWhy: '', mode: 'empty' }
+
+  const last = existing[existing.length - 1]
+  // chapters 里只存元数据，正文得单独读一次，才拿得到真实的比对指纹
+  let lastBody = ''
+  try {
+    const rec = await readChapter(env, novel.id, last.id)
+    lastBody = (rec && rec.content) || ''
+  } catch (e) { lastBody = '' }
+  const lastFp = lastBody ? await contentFp(lastBody) : ''
+  const lastTitle = normTitle(last.title)
+  const titleUnique = existing.filter((c) => normTitle(c.title) === lastTitle).length === 1
+
+  // 1) 从新稿末尾倒着找「已有最后一章」：先认正文指纹，再认同名章节
+  let anchorIdx = -1
+  let anchorWhy = ''
+  // 先按章节名找；站内本来就有重名章时才不敢用标题
+  if (lastTitle && titleUnique) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (normTitle(list[i].title) === lastTitle) { anchorIdx = i; anchorWhy = '章节名对上了'; break }
+    }
+  }
+  // 标题找不到再认正文；只在唯一命中时采信，多章内容雷同时宁可不用，免得接错位置
+  if (anchorIdx < 0 && lastFp) {
+    const hits = []
+    for (let i = 0; i < list.length; i++) {
+      if ((await contentFp(list[i].content || '')) === lastFp) hits.push(i)
+    }
+    if (hits.length === 1) { anchorIdx = hits[0]; anchorWhy = '正文和上一章对得上' }
+  }
+
+  if (anchorIdx >= 0) {
+    return {
+      fresh: list.slice(anchorIdx + 1),
+      have: list.slice(0, anchorIdx + 1),
+      anchor: list[anchorIdx].title,
+      anchorWhy,
+      mode: 'anchor',
+    }
+  }
+
+  // 2) 定位不到锚点（比如只贴了续写），就按章节名去重，标题空的话退到上一章指纹
+  const titles = new Set()
+  for (const c of existing) {
+    const t = normTitle(c.title)
+    if (t) titles.add(t)
+  }
+  const fresh = []
+  const have = []
+  for (const item of list) {
+    const t = normTitle(item.title)
+    let dup = !!t && titles.has(t)
+    if (!dup && lastFp) dup = (await contentFp(item.content || '')) === lastFp
+    if (dup) have.push(item)
+    else fresh.push(item)
+  }
+  return { fresh, have, anchor: '', anchorWhy: '', mode: 'filter' }
+}
+
 function metaOfNovel(novel) {
   return {
     id: novel.id,
@@ -539,7 +615,7 @@ async function handleApi(request, env, url, parts) {
       }
     }
 
-    // 追加导入
+    // 追加导入（先审核，再落库）
     if (parts[2] === 'import' && method === 'POST') {
       const body = await readBody(request)
       assertCanEdit(env, request, body, novel)
@@ -549,9 +625,51 @@ async function handleApi(request, env, url, parts) {
       if (src.length > MAX_TEXT) throw new HttpError(413, '文本太大（上限 5MB）')
       const list = splitChapters(src, { targetSize: body.targetSize })
       if (!list.length) throw new HttpError(400, '分不出章节')
-      const created = await appendChapters(env, novel, list)
+
+      const audit = await auditImport(env, novel, list)
+      const brief = (c) => ({ title: c.title, chars: String(c.content || '').length })
+
+      // 只审核不落库：把比对结果交给前台确认
+      if (body.dryRun) {
+        let totalChars = 0
+        for (const c of audit.fresh) totalChars += String(c.content || '').length
+        return json({
+          ok: true,
+          dryRun: true,
+          scanned: list.length,
+          existing: audit.have.length,
+          fresh: audit.fresh.length,
+          freshChars: totalChars,
+          anchor: audit.anchor,
+          anchorWhy: audit.anchorWhy,
+          mode: audit.mode,
+          preview: audit.fresh.map(brief),
+          skipped: audit.have.slice(-6).map((c) => c.title),
+          skippedTotal: audit.have.length,
+          ref: String((body && body.ref) || ''),
+        })
+      }
+
+      if (!audit.fresh.length) {
+        return json({
+          ok: true,
+          added: 0,
+          skippedTotal: audit.have.length,
+          anchor: audit.anchor,
+          message: '这份稿子里的章节站里都有了，没有新内容',
+        })
+      }
+
+      const created = await appendChapters(env, novel, audit.fresh)
       await putNovel(env, novel)
-      return json({ added: created.length, chapters: created })
+      return json({
+        ok: true,
+        added: created.length,
+        chapters: created,
+        skippedTotal: audit.have.length,
+        anchor: audit.anchor,
+        anchorWhy: audit.anchorWhy,
+      })
     }
 
     // /novel/:id/chapter
