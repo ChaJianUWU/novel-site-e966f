@@ -239,76 +239,57 @@ async function appendChapters(env, novel, list) {
 // 常见情况：作者把「整本稿子」又贴一遍，旧章节会被当成新章再落一次，越滚越多。
 // 这里先比对：在新稿里定位「已有最后一章」的位置，只取它之后的部分作为新增。
 const AUDIT_STRIP = /[^\p{L}\p{N}]+/gu
-
-async function contentFp(text) {
-  const norm = String(text || '').replace(AUDIT_STRIP, '')
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(norm))
-  return Array.from(new Uint8Array(buf)).slice(0, 10).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
+const AUDIT_PROBE = 60 // 取正文开头多少个有效字符当探针
+const AUDIT_MAX_BACK = 400 // 最多回看多少章，免得超大书把函数拖超时
 
 function normTitle(s) {
   return String(s || '').replace(AUDIT_STRIP, '').toLowerCase()
 }
 
+// 光比章节名不够：同一份稿子重新贴一遍，分章结果可能跟站里不一样——
+// 标题全变了、正文一个字没变，按标题去重就会把整本又接一遍。
+// 所以按正文认：站里已有正文拼成一条归一化长文，新章开头能在这条长文里找到，
+// 就说明这段已经进站了，跳过；找不到的才算真新章。这样分章怎么切都不影响。
 async function auditImport(env, novel, list) {
   const existing = (novel && novel.chapters) || []
   if (!existing.length) return { fresh: list, have: [], anchor: '', anchorWhy: '', mode: 'empty' }
 
-  const last = existing[existing.length - 1]
-  // chapters 里只存元数据，正文得单独读一次，才拿得到真实的比对指纹
-  let lastBody = ''
-  try {
-    const rec = await readChapter(env, novel.id, last.id)
-    lastBody = (rec && rec.content) || ''
-  } catch (e) { lastBody = '' }
-  const lastFp = lastBody ? await contentFp(lastBody) : ''
-  const lastTitle = normTitle(last.title)
-  const titleUnique = existing.filter((c) => normTitle(c.title) === lastTitle).length === 1
-
-  // 1) 从新稿末尾倒着找「已有最后一章」：先认正文指纹，再认同名章节
-  let anchorIdx = -1
-  let anchorWhy = ''
-  // 先按章节名找；站内本来就有重名章时才不敢用标题
-  if (lastTitle && titleUnique) {
-    for (let i = list.length - 1; i >= 0; i--) {
-      if (normTitle(list[i].title) === lastTitle) { anchorIdx = i; anchorWhy = '章节名对上了'; break }
-    }
+  // chapters 只存元数据，正文得逐章读；并发读，别一章一章串着等
+  const back = existing.slice(-AUDIT_MAX_BACK)
+  const recs = await Promise.all(back.map((c) => readChapter(env, novel.id, c.id).catch(() => null)))
+  const parts = []
+  for (const rec of recs) {
+    const body = String((rec && rec.content) || '')
+    if (body) parts.push(body)
   }
-  // 标题找不到再认正文；只在唯一命中时采信，多章内容雷同时宁可不用，免得接错位置
-  if (anchorIdx < 0 && lastFp) {
-    const hits = []
-    for (let i = 0; i < list.length; i++) {
-      if ((await contentFp(list[i].content || '')) === lastFp) hits.push(i)
-    }
-    if (hits.length === 1) { anchorIdx = hits[0]; anchorWhy = '正文和上一章对得上' }
-  }
+  // 去标点空白只留字和数字，分章边界变了也照样对得上
+  const oldBlob = parts.join('').replace(AUDIT_STRIP, '')
 
-  if (anchorIdx >= 0) {
-    return {
-      fresh: list.slice(anchorIdx + 1),
-      have: list.slice(0, anchorIdx + 1),
-      anchor: list[anchorIdx].title,
-      anchorWhy,
-      mode: 'anchor',
-    }
-  }
-
-  // 2) 定位不到锚点（比如只贴了续写），就按章节名去重，标题空的话退到上一章指纹
   const titles = new Set()
   for (const c of existing) {
     const t = normTitle(c.title)
     if (t) titles.add(t)
   }
+
   const fresh = []
   const have = []
   for (const item of list) {
+    const norm = String(item.content || '').replace(AUDIT_STRIP, '')
     const t = normTitle(item.title)
-    let dup = !!t && titles.has(t)
-    if (!dup && lastFp) dup = (await contentFp(item.content || '')) === lastFp
+    let dup = false
+    if (oldBlob && norm.length >= 20) {
+      // 只认开头：作者把某章续写改长了也算旧章，免得同一章越接越重复
+      dup = oldBlob.includes(norm.slice(0, AUDIT_PROBE))
+    } else if (oldBlob && norm) {
+      dup = oldBlob.includes(norm)
+    } else {
+      // 正文是空的（只有标题），退到章节名
+      dup = !!t && titles.has(t)
+    }
     if (dup) have.push(item)
     else fresh.push(item)
   }
-  return { fresh, have, anchor: '', anchorWhy: '', mode: 'filter' }
+  return { fresh, have, anchor: '', anchorWhy: '', mode: 'probe' }
 }
 
 function metaOfNovel(novel) {
