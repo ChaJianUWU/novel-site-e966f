@@ -1,6 +1,7 @@
 // Netlify Functions（v2）入口：把请求原样交给 site-core.js，存储换成 Netlify Blobs。
 // 这样整站不需要任何常开的机器，Netlify 托管运行，电脑关机照样能开。
 import { getStore } from '@netlify/blobs'
+import { createHash } from 'node:crypto'
 import worker from '../../site-core.js'
 import seed from '../../seed/kv.json'
 
@@ -57,13 +58,85 @@ function makeKV(store) {
   }
 }
 
+// ---------------- 管理员口令（存在云端，不需要付费的环境变量功能） ----------------
+// 只存 salt + SHA-256 摘要，公开仓库/公开存储里看不到明文。
+// 认领成功后把明文和摘要对上，再把明文交给 site-core 做原有校验，逻辑不变。
+const ADMIN_REC = '_admin'
+let adminCache = null // null=未读, false=还没认领, {salt,hash}=已认领
+
+function sha256(s) {
+  return createHash('sha256').update(s, 'utf8').digest('hex')
+}
+
+async function adminRecord(store) {
+  if (adminCache !== null) return adminCache
+  try {
+    const raw = await store.get(ADMIN_REC, { type: 'text' })
+    adminCache = raw ? JSON.parse(raw) : false
+  } catch {
+    adminCache = false
+  }
+  return adminCache
+}
+
+async function resolveAdminKey(store, request) {
+  if (process.env.ADMIN_KEY) return process.env.ADMIN_KEY
+  const rec = await adminRecord(store)
+  if (!rec || !rec.hash) return ''
+  let plain = (request.headers.get('x-admin-key') || '').trim()
+  if (!plain) {
+    try {
+      const body = JSON.parse(await request.clone().text())
+      plain = String((body && (body.adminKey || body.key)) || '').trim()
+    } catch {
+      // 没有 body 或不是 JSON，忽略
+    }
+  }
+  if (!plain) return ''
+  const digest = sha256(String(rec.salt || '') + plain)
+  return digest === rec.hash ? plain : ''
+}
+
+function jsonOut(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
 export default async function handler(request) {
   const store = getStore({ name: STORE_NAME, consistency: 'strong' })
   await ensureSeed(store)
+
+  // 管理员口令的认领与状态查询，由这一层直接处理
+  const url = new URL(request.url)
+  if (url.pathname === '/api/admin/claim') {
+    const usingEnv = !!process.env.ADMIN_KEY
+    const rec = await adminRecord(store)
+    if (request.method === 'GET') {
+      return jsonOut({ claimed: !!(rec && rec.hash), source: usingEnv ? 'env' : 'store' })
+    }
+    if (usingEnv) return jsonOut({ error: '已在环境变量里配置了管理员密钥，不需要认领' }, 400)
+    if (rec && rec.hash) return jsonOut({ error: '已经认领过了，直接登录即可' }, 400)
+    let body = {}
+    try {
+      body = JSON.parse(await request.text())
+    } catch {
+      return jsonOut({ error: '要 JSON' }, 400)
+    }
+    const key = String(body.key || '').trim()
+    if (key.length < 12) return jsonOut({ error: '管理员口令至少 12 位' }, 400)
+    const salt = createHash('sha256').update(String(Date.now()) + String(Math.random())).digest('hex').slice(0, 32)
+    const next = { salt, hash: sha256(salt + key), at: Date.now() }
+    await store.set(ADMIN_REC, JSON.stringify(next))
+    adminCache = next
+    return jsonOut({ ok: true })
+  }
+
   const env = {
     SITE_DB: makeKV(store),
     SYNC_KEY: process.env.SYNC_KEY || '',
-    ADMIN_KEY: process.env.ADMIN_KEY || '',
+    ADMIN_KEY: await resolveAdminKey(store, request),
     SITE_TITLE: process.env.SITE_TITLE || '小说站',
   }
   return worker.fetch(request, env)
