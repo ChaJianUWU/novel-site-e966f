@@ -1,4 +1,4 @@
-﻿// 小说站核心：路由 + API + 页面渲染
+// 小说站核心：路由 + API + 页面渲染
 //
 // 运行环境：Node（server.mjs 动态 import）或 Cloudflare Worker。
 // 存储：env.SITE_DB（KV 风格：get/put/delete/list）
@@ -415,9 +415,10 @@ async function handleApi(request, env, url, parts) {
     return json({ id: novel.id, title: novel.title, editKey: novel.editKey, chapterCount: novel.chapters.length })
   }
 
-  // ---- 口令找回 ----
+  // ---- 口令找回（必须管理员口令，否则任何人用书名+作者就能套走别人的编辑口令）----
   if (parts[0] === 'keys') {
     const body = method === 'POST' ? await readBody(request) : {}
+    if (!isAdmin(env, request, body)) throw new HttpError(403, '找回口令需要管理员密钥')
     const title = (method === 'GET' ? url.searchParams.get('title') : body.title) || ''
     const author = (method === 'GET' ? url.searchParams.get('author') : body.author) || ''
     if (!title || !author) throw new HttpError(400, '要书名和作者名都一致才能找回')
