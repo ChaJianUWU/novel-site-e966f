@@ -527,13 +527,14 @@ export function pageEdit(config, novel) {
     </div>
     <div class="panel">
       <h2 style="margin-top:0">追加导入（续写/补章）</h2>
-      <p class="muted" style="margin-top:0">贴一段，或传 txt / docx，自动分章后接到本书末尾，原有章节不动。</p>
-      <div class="field"><textarea id="itext" rows="5" placeholder="要追加的正文"></textarea></div>
+      <p class="muted" style="margin-top:0">贴整篇也行。系统先和站里已有的章节比对，只把新的部分接上去，重复的自动跳过。txt / docx 也能传。</p>
+      <div class="field"><textarea id="itext" rows="5" placeholder="整篇稿子，或者只贴新写的那几章，都行"></textarea></div>
       <div class="row">
         <input type="file" id="ifile" accept=".txt,.md,.text,.docx,.docm,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="max-width:230px">
-        <button class="btn" id="btnAppend">分章并追加</button>
+        <button class="btn" id="btnAppend">先比对，再追加</button>
         <span class="muted" id="istat"></span>
       </div>
+      <div id="iaudit"></div>
     </div>
   </div>
 </div>`
@@ -618,17 +619,58 @@ export function pageEdit(config, novel) {
       q('#itext').value=text; q('#istat').textContent='已读入 '+f.name;
     }).catch(function(e){ q('#istat').textContent=''; toast(e.message,'bad') });
   });
-  q('#btnAppend').addEventListener('click',function(){
-    var text=q('#itext').value;
-    if(!text.trim()) return toast('没有内容','bad');
-    q('#istat').textContent='处理中…';
-    postBig('/novel/'+ID+'/import',{text:text},'text','text',hdr()).then(function(d){
-      q('#istat').textContent='追加了 '+d.added+' 章';
+  var pending='', lastRef='';
+  function renderAudit(d){
+    var h='<div class="panel" style="margin-top:12px">';
+    if(!d.fresh){
+      h+='<b>比对完成：没有新内容</b><div class="muted" style="margin-top:6px">分出 '+d.scanned+' 章，站里已经有 '+d.existing+' 章，全都重复，稿子一个字都没动。</div></div>';
+      q('#iaudit').innerHTML=h; return;
+    }
+    h+='<b>比对完成：新增 '+d.fresh+' 章（约 '+d.freshChars+' 字）</b>';
+    h+='<div class="muted" style="margin-top:6px">共扫出 '+d.scanned+' 章，其中 '+d.existing+' 章站里已有，会跳过';
+    if(d.anchor){ h+='；从「'+esc(d.anchor)+'」之后开始接（'+esc(d.anchorWhy||'')+'）' }
+    h+='。</div>';
+    if(d.preview && d.preview.length){
+      h+='<div style="max-height:200px;overflow:auto;margin:10px 0;padding:8px;border:1px solid var(--line,#ddd);border-radius:8px">';
+      for(var i=0;i<d.preview.length && i<60;i++){ h+='<div>'+(i+1)+'. '+esc(d.preview[i].title)+' <span class="muted">'+d.preview[i].chars+' 字</span></div>' }
+      if(d.preview.length>60) h+='<div class="muted">… 还有 '+(d.preview.length-60)+' 章</div>';
+      h+='</div>';
+    }
+    h+='<div class="row"><button class="btn pri" id="btnOk">确认，接上去</button><button class="btn sm" id="btnNo">算了</button></div></div>';
+    q('#iaudit').innerHTML=h;
+    q('#btnNo').addEventListener('click',function(){ q('#iaudit').innerHTML='' });
+    q('#btnOk').addEventListener('click',function(){ commit(pending) });
+  }
+  function commit(text){
+    q('#iaudit').innerHTML='';
+    q('#istat').textContent='正在接上…';
+    function go(useRef){
+      var job=(useRef && lastRef)
+        ? call('/novel/'+ID+'/import','POST',{ref:lastRef},hdr())
+        : postBig('/novel/'+ID+'/import',{text:text},'text','text',hdr());
+      return job.catch(function(e){
+        if(useRef && lastRef){ lastRef=''; return go(false) }
+        throw e;
+      });
+    }
+    go(true).then(function(d){
+      if(!d.added){ q('#istat').textContent=''; return toast(d.message||'没有新内容','bad') }
+      q('#istat').textContent='接上了 '+d.added+' 章';
       chapters=chapters.concat(d.chapters.map(function(c){return {id:c.id,title:c.title}}));
       q('#side').innerHTML=chapters.map(function(c,i){
         return '<div data-cid="'+c.id+'">'+(i+1)+'. '+esc(c.title)+'</div>';
       }).join('');
-      bindSide(); q('#itext').value=''; toast('已追加 '+d.added+' 章','good');
+      bindSide(); q('#itext').value=''; toast('接上了 '+d.added+' 章','good');
+    }).catch(function(e){ q('#istat').textContent=''; toast(e.message,'bad') });
+  }
+  q('#btnAppend').addEventListener('click',function(){
+    var text=q('#itext').value;
+    if(!text.trim()) return toast('没有内容','bad');
+    pending=text; lastRef='';
+    q('#iaudit').innerHTML='';
+    q('#istat').textContent='正在比对…';
+    postBig('/novel/'+ID+'/import',{text:text,dryRun:true},'text','text',hdr()).then(function(d){
+      q('#istat').textContent=''; lastRef=d.ref||''; renderAudit(d);
     }).catch(function(e){ q('#istat').textContent=''; toast(e.message,'bad') });
   });
 })();`
