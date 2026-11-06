@@ -1,4 +1,4 @@
-﻿// 站点界面：样式、布局、各个页面、内联客户端脚本
+// 站点界面：样式、布局、各个页面、内联客户端脚本
 //
 // 约定：这个文件里的 HTML 用模板字符串写；但**页面内嵌的 <script> 代码里不要出现反引号或 ${**，
 // 一律用字符串拼接，免得被外层模板提前求值。
@@ -539,11 +539,12 @@ export function pageEdit(config, novel) {
 </div>`
   const script = `(function(){
   var ID='${esc(novel.id)}';
-  var key=needKey(ID);
-  if(!key){ location.href='/n/'+ID; return; }
+  var admin=''; try{ admin=localStorage.getItem('novel_admin_key')||'' }catch(e){}
+  var key=admin?'':needKey(ID);
+  if(!key && !admin){ location.href='/n/'+ID; return; }
   var chapters=${JSON.stringify(chapters.map((c) => ({ id: c.id, title: c.title })))};
   var cur=chapters.length?chapters[0].id:null;
-  function hdr(){ return {'x-edit-key':key} }
+  function hdr(){ return admin?{'x-admin-key':admin}:{'x-edit-key':key} }
   function mark(cid){
     qa('#side div').forEach(function(d){ d.classList.toggle('on',d.getAttribute('data-cid')===cid) });
     cur=cid;
