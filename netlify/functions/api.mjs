@@ -117,7 +117,6 @@ export default async function handler(request) {
       return jsonOut({ claimed: !!(rec && rec.hash), source: usingEnv ? 'env' : 'store' })
     }
     if (usingEnv) return jsonOut({ error: '已在环境变量里配置了管理员密钥，不需要认领' }, 400)
-    if (rec && rec.hash) return jsonOut({ error: '已经认领过了，直接登录即可' }, 400)
     let body = {}
     try {
       body = JSON.parse(await request.text())
@@ -125,7 +124,14 @@ export default async function handler(request) {
       return jsonOut({ error: '要 JSON' }, 400)
     }
     const key = String(body.key || '').trim()
-    if (key.length < 12) return jsonOut({ error: '管理员口令至少 12 位' }, 400)
+    if (key.length < 8) return jsonOut({ error: '管理员口令至少 8 位' }, 400)
+    // 已认领后要换口令：必须先在 from 里给出当前口令，防止被别人半路改掉
+    if (rec && rec.hash) {
+      const cur = String(body.from || '').trim()
+      if (!cur || sha256(String(rec.salt || '') + cur) !== rec.hash) {
+        return jsonOut({ error: '已经认领过了，要更换得先在 from 里提供当前口令' }, 403)
+      }
+    }
     const salt = createHash('sha256').update(String(Date.now()) + String(Math.random())).digest('hex').slice(0, 32)
     const next = { salt, hash: sha256(salt + key), at: Date.now() }
     await store.set(ADMIN_REC, JSON.stringify(next))
